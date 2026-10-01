@@ -1,4 +1,4 @@
-/* Sniper 1.3 — mundo automático nos mercados oficiais; sem envio de comandos. */
+/* Sniper 1.3 — mundo automático nos mercados oficiais; envio por clique com confirmação automática; sem agendamento. */
 (function (root) {
   'use strict';
   const UNITS = [
@@ -128,7 +128,16 @@
     }
     return troops;
   }
-  const api = { UNITS, integer, coordinate, parseDate, parseServerClock, formatDate, duration, remaining, sortPlans, villageImage, parseDuration, maskDate, calculate, parseVillages, publicTarget, readRallyStocks };
+  // Building values observed in BR143. The live confirmation remains authoritative.
+  const CATAPULT_TARGETS = [['main','Edifício principal'],['barracks','Quartel'],['stable','Estábulo'],['garage','Oficina'],['watchtower','Torre de vigia'],['snob','Academia'],['smith','Ferreiro'],['place','Praça de reunião'],['statue','Estátua'],['market','Mercado'],['wood','Bosque'],['stone','Poço de argila'],['iron','Mina de ferro'],['farm','Fazenda'],['storage','Armazém'],['wall','Muralha']];
+  function setCatapultTarget(form, type, counts, building) {
+    if(type !== 'attack' || !Number(counts.catapult)) return;
+    const select=form.querySelector('select[name="building"]');
+    if(!select || ![...select.options].some(o=>o.value===building&&!o.disabled))
+      throw new Error('Alvo das catapultas indisponível nesta confirmação. Selecione uma opção permitida pelo mundo.');
+    select.value=building;
+  }
+  const api = { CATAPULT_TARGETS, setCatapultTarget, UNITS, integer, coordinate, parseDate, parseServerClock, formatDate, duration, remaining, sortPlans, villageImage, parseDuration, maskDate, calculate, parseVillages, publicTarget, readRallyStocks };
   if (typeof module !== 'undefined' && module.exports) { module.exports = api; return; }
   if (!root.document) return;
   root.SupportPlanner = api;
@@ -281,6 +290,7 @@
   panel.append(details);
   (doc.getElementById('content_value') || doc.getElementById('planner-mount') || doc.body).prepend(panel);
   let units = UNITS.filter(u => u.id !== 'militia').map(u => ({ ...u })), worldSpeed = NaN, unitSpeed = NaN, rows = [], headers = {}, ready = false;
+  const catapultChoices = {};
   let currentPage = 0, pageSize = 25;
   const pager = el('div', undefined, {class:'sp-pagination'});
   pager.style.cssText='display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 14px';
@@ -319,7 +329,8 @@
   function tick() {
     const current = now();
     clockLabel.textContent = Number.isFinite(current) ? `Horário do servidor: ${formatDate(current)}` : 'Relógio do servidor indisponível. Atualize a página antes de planejar.';
-    for (const p of plans) { p.countdown.textContent = remaining(p.departure - current); p.send.disabled = !Number.isFinite(current) || p.departure < current; }
+    for (const p of plans) { p.countdown.textContent = remaining(p.departure - current); p.send.disabled = commandBusy || !Number.isFinite(current) || p.departure < current;
+      if(p.attack){const disabled=p.send.disabled||p.sent||screen!=='place'||String(root.game_data.village?.id)!==String(p.row.village.id);p.attack.disabled=disabled;p.support.disabled=disabled;p.building.disabled=commandBusy||p.sent;} }
     if (Number.isFinite(current)) sortPlans(plans, current).forEach((p,i) => { if (resultBody.children[i] !== p.element) resultBody.insertBefore(p.element, resultBody.children[i] || null); });
   }
   const ticker = setInterval(() => { if (!panel.isConnected) clearInterval(ticker); else tick(); }, 50);
@@ -442,38 +453,143 @@
         status.textContent = `${villages.length} aldeias com tropas consultadas nesta sessão. ` + (Number.isFinite(expected) && expected !== villages.length ? `O jogo informa ${expected}; a lista pública está incompleta ou desatualizada. ` : '') + 'Selecione aldeias e tropas e clique em Calcular. Atualize a coleta após movimentar tropas.';
       }
     } catch (error) { status.textContent = error.message; }
-    finally { load.disabled = false; calc.disabled = !ready; }
+    finally { load.disabled = false; calc.disabled = !ready; saveMemory(); }
   });
+  const memoryKey = 'sniper-plan-v1:' + root.game_data.world + ':' + root.game_data.player.id + ':' + (new URLSearchParams(location.search).get('t') || '');
+  let restoring = false, pendingRally = null;
+  function saveMemory() {
+    if (restoring) return true;
+    try {
+      sessionStorage.setItem(memoryKey, JSON.stringify({version:1, x:x.value,y:y.value,arrival:arrival.value,sigil:sigil.checked,percent:percent.value,
+        worldSpeed,unitSpeed,units,ready,pageSize,currentPage,catapultChoices,
+        headers:Object.fromEntries(units.map(u=>[u.id,{checked:headers[u.id]?.check.checked,quantity:headers[u.id]?.quantity.value || ''}])),
+        rows:rows.map(r=>({village:r.village,selected:r.selected.checked,counts:Object.fromEntries(units.map(u=>[u.id,r.quantities[u.id].value]))})), pending:pendingRally}));
+      return true;
+    } catch { status.textContent='Não foi possível salvar o plano nesta aba. A navegação foi interrompida para não perder os dados.'; return false; }
+  }
+  function fillPendingRally() {
+    const p=pendingRally;
+    if (!p || String(root.game_data.village?.id)!==String(p.origin) || screen!=='place') return;
+    pendingRally=null;
+    if (!saveMemory()) return;
+    try {
+      if (!Number.isFinite(now()) || now()>p.departure) throw new Error('O prazo venceu ou o relógio está indisponível. Recalcule o planejamento.');
+      const stocks=readRallyStocks(doc,units),form=doc.querySelector('#command-data-form'),assignments=[];
+      coordinate(p.target.x);coordinate(p.target.y);
+      const target=form.querySelector('input[name="input"]'),tx=form.querySelector('input[name="x"]'),ty=form.querySelector('input[name="y"]');
+      if (!target && !(tx&&ty)) throw new Error('Campos de destino não encontrados.');
+      if(target)assignments.push([target,p.target.x+'|'+p.target.y]);
+      if(tx&&ty)assignments.push([tx,p.target.x],[ty,p.target.y]);
+      for(const u of units){
+        const count=integer(p.counts[u.id]||0,u.name),input=form.querySelector('input[name="'+u.id+'"]');
+        if(count>stocks[u.id])throw new Error('Estoque mudou: '+u.name+'. Atualize as tropas e recalcule.');
+        if(!input&&count)throw new Error('Campo de tropa não encontrado: '+u.name);
+        if(input)assignments.push([input,count]);
+      }
+      assignments.forEach(([input,value])=>{input.value=String(value);input.dispatchEvent(new Event('input',{bubbles:true}));input.dispatchEvent(new Event('change',{bubbles:true}));});
+      status.textContent='Plano recuperado e praça preenchida. Confira os dados e envie manualmente. Os estoques salvos das outras aldeias podem estar desatualizados.';
+    }catch(error){status.textContent=error.message;}
+  }
+  function restoreMemory() {
+    try {
+      const raw=sessionStorage.getItem(memoryKey);if(!raw)return;
+      const saved=JSON.parse(raw);
+      if(saved.version!==1||!Array.isArray(saved.rows)||!Array.isArray(saved.units))throw new Error('Plano inválido');
+      if(saved.units.some(u=>!UNITS.some(known=>known.id===u.id)||u.id==='militia'||!Number.isFinite(u.speed)||u.speed<=0))throw new Error('Unidades inválidas');
+      restoring=true;
+      Object.assign(catapultChoices,saved.catapultChoices || {});
+      units=saved.units;worldSpeed=saved.worldSpeed;unitSpeed=saved.unitSpeed;
+      ready=!!saved.ready&&[worldSpeed,unitSpeed].every(v=>Number.isFinite(v)&&v>0);
+      render(saved.rows.map(r=>r.village));
+      x.value=saved.x||'';y.value=saved.y||'';arrival.value=saved.arrival||'';
+      arrival.dispatchEvent(new Event('input'));
+      sigil.checked=!!saved.sigil;percent.value=['10','20','30'].includes(saved.percent)?saved.percent:'10';percent.disabled=!sigil.checked;
+      for(const u of units){const h=saved.headers?.[u.id];headers[u.id].check.checked=!!h?.checked;headers[u.id].quantity.value=h?.quantity||'';headers[u.id].quantity.disabled=!h?.checked;}
+      rows.forEach((r,i)=>{r.selected.checked=!!saved.rows[i].selected;r.initialized=true;for(const u of units)r.quantities[u.id].value=String(saved.rows[i].counts?.[u.id]||'');r.refresh();});
+      const all=head.querySelector('[aria-label="Selecionar todas as aldeias"]');all.checked=rows.length>0&&rows.every(r=>r.selected.checked);all.indeterminate=!all.checked&&rows.some(r=>r.selected.checked);
+      pageSize=Number.isSafeInteger(saved.pageSize)&&saved.pageSize>0?saved.pageSize:25;sizeInput.value=String(pageSize);currentPage=Number.isSafeInteger(saved.currentPage)?saved.currentPage:0;updatePagination();
+      pendingRally=saved.pending||null;calc.disabled=!ready;
+      status.textContent='Planejamento recuperado nesta aba. Os estoques são da última coleta. Clique em Calcular para atualizar os horários ou carregue as aldeias novamente.';
+    }catch{status.textContent='Não foi possível recuperar o plano salvo. Carregue suas aldeias novamente.';}
+    finally{restoring=false;}
+  }
+  let commandBusy=false;
+  async function sendCommand(p,type) {
+    if(commandBusy || !plans.includes(p) || p.sent) return;
+    if(!['attack','support'].includes(type))return;
+    const origin=String(p.row.village.id),building=p.building.value;
+    if(screen!=='place'||String(root.game_data.village?.id)!==origin){status.textContent='Use Ir à praça para selecionar esta origem.';return;}
+    if(type==='attack'&&sigil.checked){status.textContent='Desmarque o Sinal da Aflição e recalcule para atacar.';return;}
+    if(type==='attack'&&p.counts.catapult&&!building){status.textContent='Selecione o alvo das catapultas.';return;}
+    const ledgerKey=memoryKey+':commands';
+    const key=JSON.stringify([origin,p.target,p.counts,p.arrival]);
+    let attempted=false;
+    function stillValid(){if(!plans.includes(p)||!Number.isFinite(now())||now()>p.departure)throw new Error('Plano alterado, prazo vencido ou relógio indisponível.');}
+    function endpoint(form,base,stage){
+      const url=new URL(form.getAttribute('action'),base);
+      if(form.method.toLowerCase()!=='post'||url.origin!==location.origin||url.pathname!=='/game.php'||url.searchParams.get('village')!==origin||url.searchParams.get('screen')!=='place'||(stage==='confirm'?url.searchParams.get('try')!=='confirm':url.searchParams.get('action')!=='command'))throw new Error('Destino do formulário não reconhecido. Envio interrompido.');
+      return url;
+    }
+    async function responsePage(response){
+      if(!response.ok||new URL(response.url).origin!==location.origin)throw new Error('Resposta indisponível. Confira sua sessão no jogo.');
+      const page=new DOMParser().parseFromString(await response.text(),'text/html');
+      const error=page.querySelector('.error_box');
+      if(error)throw new Error(error.textContent.trim());
+      return page;
+    }
+    function body(form,button){
+      const data=new URLSearchParams(new FormData(form));
+      if(button?.name)data.set(button.name,button.value);
+      return data;
+    }
+    try {
+      const ledger=JSON.parse(sessionStorage.getItem(ledgerKey)||'[]');
+      if(ledger.includes(key))throw new Error('Este comando já foi solicitado. Confira os comandos no jogo antes de preparar outro.');
+      commandBusy=true;tick();stillValid();
+      status.textContent='Conferindo tropas e preparando '+(type==='attack'?'ataque':'apoio')+'…';
+      const url=rallyURL(origin),page=await responsePage(await fetch(url,{credentials:'same-origin',signal:AbortSignal.timeout(20000)}));
+      const identity=page.querySelector('#menu_row2_village a');
+      if(!identity||new URL(identity.getAttribute('href'),location.origin).searchParams.get('village')!==origin)throw new Error('Origem não confirmada.');
+      const stocks=readRallyStocks(page,units),form=page.querySelector('#command-data-form');
+      const button=form.querySelector(type==='attack'?'#target_attack':'#target_support');
+      if(!button)throw new Error('Botão da praça indisponível.');
+      for(const u of units){const count=integer(p.counts[u.id]||0,u.name),field=form.querySelector('[name="'+u.id+'"]');if(count>stocks[u.id]||(!field&&count))throw new Error('Tropas indisponíveis: '+u.name);if(field)field.value=String(count);}
+      const data=body(form,button);data.set('x',p.target.x);data.set('y',p.target.y);data.set('input',p.target.x+'|'+p.target.y);
+      const confirmURL=endpoint(form,url,'confirm');stillValid();
+      const confirmation=await responsePage(await fetch(confirmURL,{method:'POST',body:data,credentials:'same-origin',signal:AbortSignal.timeout(20000)}));
+      const cf=confirmation.querySelector('#command-data-form'),submit=cf?.querySelector('#troop_confirm_submit');
+      if(!cf||!submit)throw new Error('Confirmação indisponível. Confira login ou eventual verificação do jogo.');
+      const value=name=>cf.querySelector('[name="'+name+'"]')?.value;
+      if(!cf.querySelector('input[name="'+type+'"]')||String(value('source_village'))!==origin||Number(value('x'))!==Number(p.target.x)||Number(value('y'))!==Number(p.target.y))throw new Error('A confirmação não corresponde ao comando planejado.');
+      for(const u of units)if(integer(value(u.id)??0,u.name)!==Number(p.counts[u.id]||0))throw new Error('Tropas divergentes na confirmação: '+u.name);
+      const live=cf.querySelector('select[name="building"]');
+      if(type==='attack'&&p.counts.catapult&&live){
+        p.building.replaceChildren(el('option','Selecione o edifício',{value:''}));
+        [...live.options].filter(o=>!o.disabled).forEach(o=>p.building.append(el('option',o.textContent,{value:o.value})));
+        p.building.value=building;
+      }
+      setCatapultTarget(cf,type,p.counts,building);
+      const finalURL=endpoint(cf,confirmURL,'command'),finalData=body(cf,submit);
+      finalData.delete('save_default_attack_building');
+      if(type!=='attack'||!p.counts.catapult)finalData.delete('building');
+      stillValid();
+      // Persist before the irreversible request; an ambiguous response is never retried.
+      sessionStorage.setItem(ledgerKey,JSON.stringify([...ledger,key]));attempted=true;p.sent=true;
+      status.textContent='Solicitando envio…';
+      await responsePage(await fetch(finalURL,{method:'POST',body:finalData,credentials:'same-origin',signal:AbortSignal.timeout(20000)}));
+      p.commandStatus.textContent='Envio solicitado — confira no jogo';
+      status.textContent='Solicitação enviada. Confira a lista de comandos do jogo para confirmar o resultado e atualize as tropas. Não há reenvio automático.';
+    }catch(error){
+      status.textContent=(attempted?'Resultado do envio não confirmado. Confira os comandos no jogo antes de repetir. ':'')+error.message;
+      if(attempted)p.commandStatus.textContent='Verifique o comando no jogo';
+    }finally{commandBusy=false;tick();}
+  }
   function openRally(p) {
     if (!Number.isFinite(now()) || p.departure < now() || !plans.includes(p)) return;
-    const url = new URL('/game.php', location.origin);
-    url.searchParams.set('village', p.row.village.id); url.searchParams.set('screen', 'place');
-    const sitter = new URLSearchParams(location.search).get('t'); if (sitter) url.searchParams.set('t', sitter);
-    const tab = root.open(url.href, '_blank');
-    if (!tab) { status.textContent = 'O navegador bloqueou a aba. Permita pop-ups para abrir a praça.'; return; }
-    let attempts = 0;
-    const timer = setInterval(() => {
-      if (++attempts > 80 || tab.closed) { clearInterval(timer); status.textContent = 'Não foi possível preencher a praça. Confira a nova aba e preencha manualmente.'; return; }
-      try {
-        if (tab.location.pathname !== '/game.php' || tab.document.readyState !== 'complete') return;
-        if (new URLSearchParams(tab.location.search).get('village') !== String(p.row.village.id)) return;
-        const form = tab.document.querySelector('#command-data-form');
-        if (!form) return;
-        const targetInput = form.querySelector('input[name="input"]');
-        const tx = form.querySelector('input[name="x"]'), ty = form.querySelector('input[name="y"]');
-        if (!targetInput && !(tx && ty)) return;
-        const assignments = [];
-        if (targetInput) assignments.push([targetInput, `${p.target.x}|${p.target.y}`]);
-        if (tx && ty) assignments.push([tx, p.target.x], [ty, p.target.y]);
-        for (const u of units) {
-          const input = form.querySelector(`input[name="${u.id}"]`);
-          if (!input && p.counts[u.id] > 0) return;
-          if (input) assignments.push([input, p.counts[u.id] || 0]);
-        }
-        assignments.forEach(([input, value]) => { input.value = String(value); input.dispatchEvent(new tab.Event('input', { bubbles: true })); input.dispatchEvent(new tab.Event('change', { bubbles: true })); });
-        clearInterval(timer); status.textContent = 'Praça preenchida. Confira os dados e escolha Apoio ou Ataque manualmente; o plano calculado considera apoio.';
-      } catch { clearInterval(timer); status.textContent = 'A praça foi aberta, mas não pôde ser preenchida. Confira os dados manualmente.'; }
-    }, 250);
+    pendingRally={origin:p.row.village.id,target:{...p.target},counts:{...p.counts},departure:p.departure};
+    if(!saveMemory())return;
+    if(screen==='place' && String(root.game_data.village?.id)===String(pendingRally.origin) && doc.querySelector('#command-data-form'))fillPendingRally();
+    else location.assign(rallyURL(p.row.village.id).href);
   }
   calc.addEventListener('click', () => {
     if (!ready) { status.textContent = 'Carregue suas aldeias primeiro.'; return; }
@@ -501,9 +617,21 @@
         const formationCell = el('td'); formationCell.append(formation);
         const timeCell = el('td', undefined, { class: 'sp-time' }), countdown = el('div', '—');
         timeCell.append(countdown, el('div', 'Saída: ' + formatDate(plan.departure), { class: 'sp-note' }), el('div', 'Viagem: ' + duration(plan.travel), { class: 'sp-note' }));
-        const send = el('button', 'Enviar', { type: 'button', title: 'Abrir a praça e preencher; confirmação manual' }), action = el('td'); action.append(send);
+        const send = el('button', 'Ir à praça', { type: 'button', title: 'Abrir nesta aba; execute Sniper novamente para recuperar o plano e preencher a praça' }), action = el('td'); action.append(send);
+        const attack=el('button','Ataque',{type:'button',title:'Enviar ataque agora, incluindo a confirmação'}),support=el('button','Apoio',{type:'button',title:'Enviar apoio agora, incluindo a confirmação'}),commandStatus=el('div','',{class:'sp-note','aria-live':'polite'});
+        const buttons=el('div');buttons.style.cssText='display:flex;gap:4px;justify-content:center;margin-top:6px';buttons.append(attack,support);action.append(buttons,el('div','Envio imediato',{class:'sp-note'}),commandStatus);
+        const building = el('select', undefined, {'aria-label':'Alvo das catapultas — '+row.village.name});
+        const liveBuildings=doc.querySelector('#command-data-form select[name="building"]');
+        const choices=liveBuildings ? [...liveBuildings.options].filter(o=>!o.disabled).map(o=>[o.value,o.textContent]) : CATAPULT_TARGETS;
+        building.append(el('option','Selecione o edifício',{value:''}));
+        choices.forEach(([value,label])=>building.append(el('option',label,{value})));
+        building.value=catapultChoices[row.village.id] || '';
+        building.addEventListener('change',()=>{catapultChoices[row.village.id]=building.value;saveMemory();});
+        const buildingLabel=labeled('Alvo das catapultas',building);buildingLabel.hidden=!counts.catapult;
+        buildingLabel.style.marginTop='8px';action.append(buildingLabel);
         tr.append(el('td', `${row.village.name} (${row.village.x}|${row.village.y})`), el('td', plan.distance.toFixed(2)), formationCell, timeCell, action);
-        const p = { ...plan, element: tr, row, counts: { ...counts }, target: { x: x.value, y: y.value }, countdown, send };
+        const p = { ...plan, element: tr, row, counts: { ...counts }, target: { x: x.value, y: y.value }, countdown, send, building, attack, support, commandStatus };
+        attack.addEventListener('click',()=>sendCommand(p,'attack'));support.addEventListener('click',()=>sendCommand(p,'support'));
         send.addEventListener('click', () => openRally(p)); plans.push(p); resultBody.append(tr);
         success++;
       } catch (error) { const tr = el('tr'); tr.append(el('td', row.village.name), el('td', error.message, { colspan: '4', class: 'sp-error' })); resultBody.append(tr); failed++; }
@@ -514,7 +642,13 @@
   render([]);
   calc.disabled = !ready;
 
+  restoreMemory();
   tick();
   updateTargetCard();
+  fillPendingRally();
+  panel.addEventListener('input',()=>queueMicrotask(saveMemory));
+  panel.addEventListener('change',()=>queueMicrotask(saveMemory));
+  panel.addEventListener('click',()=>queueMicrotask(saveMemory));
+  root.addEventListener('pagehide',saveMemory);
 })(typeof window !== 'undefined' ? window : globalThis);
 
