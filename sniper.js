@@ -1,4 +1,4 @@
-/* Sniper BR144 1.0 — execução manual; sem envio de comandos. Requer aprovação do suporte. */
+/* Sniper 1.3 — mundo automático nos mercados oficiais; sem envio de comandos. */
 (function (root) {
   'use strict';
   const UNITS = [
@@ -28,6 +28,12 @@
         date.getUTCDate() !== d || h > 23 || mi > 59 || s > 59)
       throw new Error('Data ou horário inválido. Use o relógio do servidor.');
     return date.getTime();
+  }
+  function parseServerClock(date, time) {
+    const text = date.trim();
+    const iso = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+    const normalized = iso ? `${iso[3]}/${iso[2]}/${iso[1]}` : text.replace(/[.-]/g, '/');
+    return parseDate(`${normalized} ${time.trim()}:000`);
   }
   function formatDate(value) {
     const d = new Date(value);
@@ -122,14 +128,17 @@
     }
     return troops;
   }
-  const api = { UNITS, integer, coordinate, parseDate, formatDate, duration, remaining, sortPlans, villageImage, parseDuration, maskDate, calculate, parseVillages, publicTarget, readRallyStocks };
+  const api = { UNITS, integer, coordinate, parseDate, parseServerClock, formatDate, duration, remaining, sortPlans, villageImage, parseDuration, maskDate, calculate, parseVillages, publicTarget, readRallyStocks };
   if (typeof module !== 'undefined' && module.exports) { module.exports = api; return; }
   if (!root.document) return;
   root.SupportPlanner = api;
-  const doc = root.document, preview = undefined;
-  if (!preview && (location.hostname !== 'br144.tribalwars.com.br' || !root.game_data)) return;
+  const doc = root.document;
+  if ((!/^[a-z]{2,4}\d+\.(?:tribalwars\.(?:com\.br|com\.pt|co\.uk|net|com|us|nl|dk|se|ae|asia|works)|die-staemme\.de|staemme\.ch|plemiona\.pl|divokekmeny\.cz|divoke-kmene\.sk|guerretribale\.fr|guerrastribales\.es|tribals\.it|triburile\.ro|klanhaboru\.hu|klanlar\.org|fyletikesmaxes\.gr|vojnaplemen\.si|plemena\.com|voynaplemyon\.com)$/.test(location.hostname) || !root.game_data || String(root.game_data.world) !== location.hostname.split('.')[0])) {
+    alert('Abra um mundo oficial do Tribal Wars com a conta autenticada.'); return;
+  }
+  const worldName = String(root.game_data.world).toUpperCase();
   const screen = root.game_data?.screen;
-  if (!preview && screen !== 'place' && screen !== 'overview_villages') {
+  if (screen !== 'place' && screen !== 'overview_villages') {
     alert('Abra a praça de reunião ou a visualização de comandos chegando.'); return;
   }
   const old = doc.getElementById('support-planner');
@@ -152,7 +161,7 @@
     #support-planner .sp-target-meta{font-size:10px;white-space:normal;overflow-wrap:anywhere}
     #support-planner .sp-target-card button{position:absolute;right:3px;top:1px;background:none;border:0;box-shadow:none;color:#b00000;font:bold 20px Arial;padding:0 2px}
     #support-planner label{display:block}#support-planner .sp-label{font-weight:bold;display:block;margin-bottom:5px}
-    #support-planner input:not([type=checkbox]),#support-planner select{background:#fff;color:#000;border:1px solid #a99876;border-radius:0;padding:3px;font:11px Verdana,Arial,sans-serif}
+    #support-planner input:not([type=checkbox]),#support-planner select{background:#fff;color:#000;border:1px solid #a99876;border-radius:0;padding:3px;font:12px Verdana,Arial,sans-serif}
     #support-planner input[type=checkbox]{width:13px;height:13px;accent-color:#725323;vertical-align:middle;margin:3px}
     #support-planner button{cursor:pointer;border:1px solid #513510;border-radius:3px;background:linear-gradient(#ad8b50,#674115);box-shadow:inset 0 1px #d8bd80;color:white;padding:3px 6px;font:bold 12px Verdana,Arial,sans-serif}
     #support-planner button:disabled{opacity:.5;cursor:default}#support-planner input:disabled,#support-planner select:disabled{opacity:.45}
@@ -178,7 +187,7 @@
   const y = el('input', undefined, { class: 'sp-coordinate', inputmode: 'numeric', maxlength: '3', placeholder: 'Y', 'aria-label': 'Coordenada Y do destino' });
   const coords = el('div', undefined, { class: 'sp-destination' }); coords.append(el('span', 'Destino: coordenadas', { class: 'sp-label' }), x, doc.createTextNode(' | '), y);
   const targetCard = el('div', undefined, { class: 'sp-target-card', 'aria-label': 'Informações da aldeia alvo' });
-  const targetImage = el('img', undefined, { ...(preview ? { src: villageImage(5218) } : {}), alt: 'Aldeia de 3.000 a 8.999 pontos' });
+  const targetImage = el('img', undefined, { alt: 'Aldeia alvo', hidden: '' });
   const targetInfo = el('div'), targetName = el('div', '', { class: 'sp-target-title' }), targetMeta = el('div', '', { class: 'sp-target-meta' });
   targetInfo.style.minWidth = '0'; targetInfo.append(targetName, targetMeta);
   const clearTarget = el('button', '×', { type: 'button', 'aria-label': 'Limpar destino' });
@@ -195,16 +204,10 @@
     if (key === targetKey) return;
     targetKey = key; const request = ++targetRequest;
     targetImage.hidden = true; targetName.textContent = `Consultando ${key}…`; targetName.title = '';
-    targetMeta.textContent = 'Buscando dados públicos do BR144'; targetCard.setAttribute('aria-busy', 'true');
+    targetMeta.textContent = 'Buscando dados públicos do ' + worldName; targetCard.setAttribute('aria-busy', 'true');
     try {
       let data;
-      if (preview) {
-        const endpoint = new URL('/api/target', location.protocol === 'file:' ? 'http://127.0.0.1:4178' : location.origin);
-        endpoint.searchParams.set('x', x.value); endpoint.searchParams.set('y', y.value);
-        const response = await fetch(endpoint, { signal: AbortSignal.timeout(25000) });
-        if (!response.ok) throw new Error('Consulta pública indisponível');
-        data = (await response.json()).village;
-      } else {
+      {
         if (!publicFiles || Date.now() - publicFilesAt > 300000) {
           publicFilesAt = Date.now();
           publicFiles = Promise.all([read('/map/village.txt'), read('/map/player.txt')]);
@@ -222,7 +225,7 @@
     } catch {
       if (request !== targetRequest) return;
       targetKey = ''; targetName.textContent = 'Não foi possível consultar';
-      targetMeta.textContent = preview ? 'Abra o painel local e tente novamente.' : 'Verifique a conexão e tente novamente.';
+      targetMeta.textContent = 'Verifique a conexão e tente novamente.';
     } finally { if (request === targetRequest) targetCard.removeAttribute('aria-busy'); }
   }
   x.addEventListener('input', () => {
@@ -235,8 +238,21 @@
   });
   y.addEventListener('blur', updateTargetCard);
   clearTarget.addEventListener('click', () => { x.value = ''; y.value = ''; x.dispatchEvent(new Event('input', { bubbles: true })); y.dispatchEvent(new Event('input', { bubbles: true })); x.focus(); });
-  const arrival = el('input', undefined, { class: 'sp-date', placeholder: 'dd/mm/aaaa hh:MM:ss:mmm', maxlength: '23', inputmode: 'numeric', 'aria-label': 'Chegada no horário do servidor' });
-  arrival.addEventListener('input', () => { arrival.value = maskDate(arrival.value); });
+  const arrival = el('input', undefined, { class: 'sp-date', maxlength: '23', inputmode: 'numeric', 'aria-label': 'Chegada no horário do servidor' });
+  const arrivalFormat = 'dd/mm/aaaa hh:MM:ss:mmm';
+  const arrivalField = el('span', undefined, {class:'sp-date-field'});
+  arrivalField.style.cssText='display:inline-block;position:relative';
+  arrival.style.cssText='font:12px Verdana,Arial,sans-serif;font-variant-numeric:tabular-nums;letter-spacing:normal;margin:0;vertical-align:middle';
+  const arrivalHint=el('span', undefined, {'aria-hidden':'true'});
+  arrivalHint.style.cssText='position:absolute;left:4px;top:50%;transform:translateY(-50%);pointer-events:none;white-space:pre;font:12px Verdana,Arial,sans-serif;font-variant-numeric:tabular-nums;letter-spacing:normal;color:#888';
+  const enteredHint=el('span'), remainingHint=el('span',arrivalFormat);
+  enteredHint.style.visibility='hidden';
+  arrivalHint.append(enteredHint,remainingHint);arrivalField.append(arrival,arrivalHint);
+  arrival.addEventListener('input', () => {
+    arrival.value = maskDate(arrival.value);
+    enteredHint.textContent=arrival.value;
+    remainingHint.textContent=arrivalFormat.slice(arrival.value.length);
+  });
   const sigil = el('input', undefined, { type: 'checkbox', 'aria-label': 'Sinal de Aflição ativo no destino' });
   const sigilLabel = el('div', undefined, { class: 'sp-sigil' });
   const percent = el('select', undefined, { 'aria-label': 'Percentual do Sinal de Aflição' });
@@ -245,10 +261,9 @@
   sigil.addEventListener('change', () => { percent.disabled = !sigil.checked; });
   sigilLabel.append(el('span', 'Sinal da aflição', { class: 'sp-label' }), sigil, percent);
   const calc = el('button', 'Calcular', { type: 'button' });
-  toolbar.append(coords, targetCard, labeled('Chegada - Horário alvo', arrival), sigilLabel, calc);
+  toolbar.append(coords, targetCard, labeled('Chegada - Horário alvo', arrivalField), sigilLabel, calc);
   panel.append(toolbar);
   const load = el('button', 'Carregar minhas aldeias', { type: 'button' });
-  if (!preview) panel.append(load);
   const status = el('p', 'Selecione aldeias e tropas para montar o plano.', { class: 'sp-status', role: 'status', 'aria-live': 'polite' });
   const scroll = el('div', undefined, { class: 'sp-scroll' });
   const table = el('table', undefined, { 'aria-label': 'Tropas por aldeia' }), head = el('thead'), body = el('tbody'); table.append(head, body); scroll.append(table); panel.append(scroll, status);
@@ -265,25 +280,45 @@
   details.append(el('p', 'Os milésimos digitados são preservados na subtração. Confira as durações e use o relógio do servidor para o envio manual.'));
   panel.append(details);
   (doc.getElementById('content_value') || doc.getElementById('planner-mount') || doc.body).prepend(panel);
-  let units = UNITS.filter(u => u.id !== 'militia').map(u => ({ ...u })), worldSpeed = 2, unitSpeed = .5, rows = [], headers = {}, ready = !!preview;
+  let units = UNITS.filter(u => u.id !== 'militia').map(u => ({ ...u })), worldSpeed = NaN, unitSpeed = NaN, rows = [], headers = {}, ready = false;
+  let currentPage = 0, pageSize = 25;
+  const pager = el('div', undefined, {class:'sp-pagination'});
+  pager.style.cssText='display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 14px';
+  const sizeInput = el('input', undefined, {type:'text',inputmode:'numeric','aria-label':'Aldeias por página',size:'4',maxlength:'5'});
+  sizeInput.value='25';
+  const previous=el('button','Anterior',{type:'button'}), next=el('button','Próxima',{type:'button'}), pageLabel=el('span','',{ 'aria-live':'polite'});
+  const sizeLabel=el('label','Aldeias por página ');sizeLabel.append(sizeInput);
+  load.style.marginLeft='auto';
+  pager.append(sizeLabel,previous,next,pageLabel,load);scroll.after(pager);
+  function updatePagination(){
+    const total=Math.ceil(rows.length/pageSize);
+    currentPage=Math.max(0,Math.min(currentPage,Math.max(0,total-1)));
+    rows.forEach((row,index)=>{row.selected.closest('tr').hidden=index<currentPage*pageSize || index>=(currentPage+1)*pageSize;});
+    previous.disabled=currentPage===0;next.disabled=!total||currentPage>=total-1;
+    pageLabel.textContent=total ? 'Página '+(currentPage+1)+' de '+total+' · '+rows.length+' aldeias' : 'Nenhuma aldeia carregada';
+  }
+  sizeInput.addEventListener('input',()=>{
+    if(!/^[1-9]\d*$/.test(sizeInput.value)){sizeInput.setCustomValidity('Informe um número inteiro maior que zero.');return;}
+    sizeInput.setCustomValidity('');pageSize=Number(sizeInput.value);currentPage=0;updatePagination();
+  });
+  sizeInput.addEventListener('blur',()=>{if(!sizeInput.checkValidity()){sizeInput.value=String(pageSize);sizeInput.setCustomValidity('');}});
+  previous.addEventListener('click',()=>{currentPage--;updatePagination();});
+  next.addEventListener('click',()=>{currentPage++;updatePagination();});
   let plans = [], clockAnchor = null, clockText = '', clockSample = 0;
   function now() {
-    if (preview) {
-      const d = new Date();
-      return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours(), d.getMinutes(), d.getSeconds(), d.getMilliseconds());
-    }
+
     const date = doc.getElementById('serverDate')?.textContent.trim(), time = doc.getElementById('serverTime')?.textContent.trim();
     if (!date || !time) return NaN;
     const stamp = `${date} ${time}`;
     if (stamp !== clockText) {
-      try { clockAnchor = parseDate(stamp + ':000'); clockSample = performance.now(); clockText = stamp; } catch { return NaN; }
+      try { clockAnchor = parseServerClock(date, time); clockSample = performance.now(); clockText = stamp; } catch { return NaN; }
     }
     const elapsed = performance.now() - clockSample;
     return elapsed > 3000 ? NaN : clockAnchor + elapsed;
   }
   function tick() {
     const current = now();
-    clockLabel.textContent = Number.isFinite(current) ? `${preview ? 'Horário atual' : 'Horário do servidor'}: ${formatDate(current)}` : 'Relógio do servidor indisponível. Atualize a página antes de planejar.';
+    clockLabel.textContent = Number.isFinite(current) ? `Horário do servidor: ${formatDate(current)}` : 'Relógio do servidor indisponível. Atualize a página antes de planejar.';
     for (const p of plans) { p.countdown.textContent = remaining(p.departure - current); p.send.disabled = !Number.isFinite(current) || p.departure < current; }
     if (Number.isFinite(current)) sortPlans(plans, current).forEach((p,i) => { if (resultBody.children[i] !== p.element) resultBody.insertBefore(p.element, resultBody.children[i] || null); });
   }
@@ -297,6 +332,7 @@
   for (const input of [x, y, sigil, percent]) input.addEventListener('input', () => { clearDurations(); invalidate(); });
   arrival.addEventListener('input', invalidate);
   function render(villages) {
+    currentPage=0;
     head.replaceChildren(); body.replaceChildren(); resultBody.replaceChildren(); resultScroll.hidden = true; rows = []; headers = {};
     const hr = el('tr'), first = el('th', undefined, { scope: 'col' });
     const all = el('input', undefined, { type: 'checkbox', 'aria-label': 'Selecionar todas as aldeias' });
@@ -346,6 +382,7 @@
       verified.addEventListener('input', invalidate);
     }
     all.addEventListener('change', () => { rows.forEach(r => { r.selected.checked = all.checked; if (all.checked) r.initialized = false; r.refresh(); }); all.indeterminate = false; invalidate(); });
+    updatePagination();
     if (!villages.length) { const tr = el('tr'); tr.append(el('td', 'Carregue suas aldeias para selecionar as origens.', { colspan: String(units.length + 3) })); body.append(tr); }
   }
   async function read(path) {
@@ -369,11 +406,8 @@
     load.disabled = true; calc.disabled = true; ready = false;
     invalidate();
     try {
-      if (preview) {
-        render(preview.villages); ready = true;
-        status.textContent = 'Selecione as origens, tropas e quantidades.';
-      } else {
-        status.textContent = 'Consultando configurações e mapa público do BR144…';
+      {
+        status.textContent = `Consultando configurações e mapa público do ${worldName}…`;
         const [configText, unitText, villageText] = await Promise.all([
           read('/interface.php?func=get_config'), read('/interface.php?func=get_unit_info'), read('/map/village.txt')
         ]);
@@ -381,8 +415,11 @@
         worldSpeed = Number(config.querySelector('config > speed')?.textContent);
         unitSpeed = Number(config.querySelector('config > unit_speed')?.textContent);
         if (![worldSpeed, unitSpeed].every(n => Number.isFinite(n) && n > 0)) throw new Error('Velocidades públicas inválidas.');
-        units = UNITS.filter(u => u.id !== 'militia' && info.querySelector(u.id)).map(u => ({ ...u, speed: Number(info.querySelector(u.id + ' > speed')?.textContent) }));
+        const enabledUnits = Array.isArray(root.game_data.units) ? root.game_data.units : null;
+        const archersEnabled = config.querySelector('game > archer')?.textContent.trim();
+        units = UNITS.filter(u => u.id !== 'militia' && info.querySelector(u.id) && (!enabledUnits || enabledUnits.includes(u.id)) && (archersEnabled !== '0' || !['archer', 'marcher'].includes(u.id))).map(u => ({ ...u, speed: Number(info.querySelector(u.id + ' > speed')?.textContent) }));
         if (!units.length) throw new Error('Nenhuma unidade encontrada.');
+        if (units.some(u => !Number.isFinite(u.speed) || u.speed <= 0)) throw new Error('Velocidade de unidade inválida nas configurações do mundo.');
         const villages = parseVillages(villageText, root.game_data.player.id);
         if (!villages.length) throw new Error('Nenhuma aldeia sua encontrada no mapa público. Ele pode estar desatualizado.');
         // Read only normal rally pages accessible in the current authenticated session.
@@ -409,15 +446,6 @@
   });
   function openRally(p) {
     if (!Number.isFinite(now()) || p.departure < now() || !plans.includes(p)) return;
-    if (preview) {
-      const url = new URL('rally-preview.html', location.href);
-      url.searchParams.set('name', p.row.village.name);
-      url.searchParams.set('origin', `${p.row.village.x}|${p.row.village.y}`);
-      url.searchParams.set('x', p.target.x); url.searchParams.set('y', p.target.y);
-      Object.entries(p.counts).forEach(([unit, count]) => url.searchParams.set(unit, String(count)));
-      if (!root.open(url.href, '_blank')) status.textContent = 'Permita abrir uma nova aba para visualizar a praça de reunião.';
-      return;
-    }
     const url = new URL('/game.php', location.origin);
     url.searchParams.set('village', p.row.village.id); url.searchParams.set('screen', 'place');
     const sitter = new URLSearchParams(location.search).get('t'); if (sitter) url.searchParams.set('t', sitter);
@@ -483,11 +511,9 @@
     resultScroll.hidden = !(success || failed); tick();
     status.textContent = success || failed ? `${success} horários calculados; ${failed} linhas precisam de correção. Use o horário do servidor. Nenhum comando foi enviado.` : 'Selecione pelo menos uma aldeia.';
   });
-  render(preview ? preview.villages : []);
+  render([]);
   calc.disabled = !ready;
-  if (preview) {
-    x.value = '526'; y.value = '568'; arrival.value = '01/10/2026 10:00:00:000';
-  }
+
   tick();
   updateTargetCard();
 })(typeof window !== 'undefined' ? window : globalThis);
