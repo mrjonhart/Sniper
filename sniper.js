@@ -272,7 +272,7 @@
   const calc = el('button', 'Calcular', { type: 'button' });
   toolbar.append(coords, targetCard, labeled('Chegada - Horário alvo', arrivalField), sigilLabel, calc);
   panel.append(toolbar);
-  const load = el('button', 'Carregar minhas aldeias', { type: 'button' });
+  const load = el('button', 'Carregar aldeias', { type: 'button' });
   const status = el('p', 'Selecione aldeias e tropas para montar o plano.', { class: 'sp-status', role: 'status', 'aria-live': 'polite' });
   const scroll = el('div', undefined, { class: 'sp-scroll' });
   const table = el('table', undefined, { 'aria-label': 'Tropas por aldeia' }), head = el('thead'), body = el('tbody'); table.append(head, body); scroll.append(table); panel.append(scroll, status);
@@ -290,7 +290,7 @@
   panel.append(details);
   (doc.getElementById('content_value') || doc.getElementById('planner-mount') || doc.body).prepend(panel);
   let units = UNITS.filter(u => u.id !== 'militia').map(u => ({ ...u })), worldSpeed = NaN, unitSpeed = NaN, rows = [], headers = {}, ready = false;
-  const catapultChoices = {};
+
   let currentPage = 0, pageSize = 25;
   const pager = el('div', undefined, {class:'sp-pagination'});
   pager.style.cssText='display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 14px';
@@ -298,8 +298,14 @@
   sizeInput.value='25';
   const previous=el('button','Anterior',{type:'button'}), next=el('button','Próxima',{type:'button'}), pageLabel=el('span','',{ 'aria-live':'polite'});
   const sizeLabel=el('label','Aldeias por página ');sizeLabel.append(sizeInput);
-  load.style.marginLeft='auto';
-  pager.append(sizeLabel,previous,next,pageLabel,load);scroll.after(pager);
+  const building = el('select', undefined, {'aria-label':'Catapultar:'});
+  const liveBuildings=doc.querySelector('#command-data-form select[name="building"]');
+  const choices=liveBuildings ? [...liveBuildings.options].filter(o=>!o.disabled).map(o=>[o.value,o.textContent]) : CATAPULT_TARGETS;
+  building.append(el('option','Selecione o edifício',{value:''}));
+  choices.forEach(([value,label])=>building.append(el('option',label,{value})));
+  const buildingLabel=el('label','Catapultar: ');buildingLabel.style.cssText='display:flex;align-items:center;gap:6px';buildingLabel.append(building);
+  const loadControls=el('div');loadControls.style.cssText='margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap';loadControls.append(buildingLabel,load);
+  pager.append(sizeLabel,previous,next,pageLabel,loadControls);scroll.after(pager);
   function updatePagination(){
     const total=Math.ceil(rows.length/pageSize);
     currentPage=Math.max(0,Math.min(currentPage,Math.max(0,total-1)));
@@ -330,7 +336,7 @@
     const current = now();
     clockLabel.textContent = Number.isFinite(current) ? `Horário do servidor: ${formatDate(current)}` : 'Relógio do servidor indisponível. Atualize a página antes de planejar.';
     for (const p of plans) { p.countdown.textContent = remaining(p.departure - current); p.send.disabled = commandBusy || !Number.isFinite(current) || p.departure < current;
-      if(p.attack){const disabled=p.send.disabled||p.sent||screen!=='place'||String(root.game_data.village?.id)!==String(p.row.village.id);p.attack.disabled=disabled;p.support.disabled=disabled;p.building.disabled=commandBusy||p.sent;} }
+      if(p.attack){const disabled=p.send.disabled||p.sent||screen!=='place'||String(root.game_data.village?.id)!==String(p.row.village.id);p.attack.disabled=disabled;p.support.disabled=disabled;p.building.disabled=commandBusy;} }
     if (Number.isFinite(current)) sortPlans(plans, current).forEach((p,i) => { if (resultBody.children[i] !== p.element) resultBody.insertBefore(p.element, resultBody.children[i] || null); });
   }
   const ticker = setInterval(() => { if (!panel.isConnected) clearInterval(ticker); else tick(); }, 50);
@@ -461,7 +467,7 @@
     if (restoring) return true;
     try {
       sessionStorage.setItem(memoryKey, JSON.stringify({version:1, x:x.value,y:y.value,arrival:arrival.value,sigil:sigil.checked,percent:percent.value,
-        worldSpeed,unitSpeed,units,ready,pageSize,currentPage,catapultChoices,
+        worldSpeed,unitSpeed,units,ready,pageSize,currentPage,catapultBuilding:building.value,
         headers:Object.fromEntries(units.map(u=>[u.id,{checked:headers[u.id]?.check.checked,quantity:headers[u.id]?.quantity.value || ''}])),
         rows:rows.map(r=>({village:r.village,selected:r.selected.checked,counts:Object.fromEntries(units.map(u=>[u.id,r.quantities[u.id].value]))})), pending:pendingRally}));
       return true;
@@ -497,7 +503,7 @@
       if(saved.version!==1||!Array.isArray(saved.rows)||!Array.isArray(saved.units))throw new Error('Plano inválido');
       if(saved.units.some(u=>!UNITS.some(known=>known.id===u.id)||u.id==='militia'||!Number.isFinite(u.speed)||u.speed<=0))throw new Error('Unidades inválidas');
       restoring=true;
-      Object.assign(catapultChoices,saved.catapultChoices || {});
+      building.value=saved.catapultBuilding || ''; 
       units=saved.units;worldSpeed=saved.worldSpeed;unitSpeed=saved.unitSpeed;
       ready=!!saved.ready&&[worldSpeed,unitSpeed].every(v=>Number.isFinite(v)&&v>0);
       render(saved.rows.map(r=>r.village));
@@ -620,15 +626,6 @@
         const send = el('button', 'Ir à praça', { type: 'button', title: 'Abrir nesta aba; execute Sniper novamente para recuperar o plano e preencher a praça' }), action = el('td'); action.append(send);
         const attack=el('button','Ataque',{type:'button',title:'Enviar ataque agora, incluindo a confirmação'}),support=el('button','Apoio',{type:'button',title:'Enviar apoio agora, incluindo a confirmação'}),commandStatus=el('div','',{class:'sp-note','aria-live':'polite'});
         const buttons=el('div');buttons.style.cssText='display:flex;gap:4px;justify-content:center;margin-top:6px';buttons.append(attack,support);action.append(buttons,el('div','Envio imediato',{class:'sp-note'}),commandStatus);
-        const building = el('select', undefined, {'aria-label':'Alvo das catapultas — '+row.village.name});
-        const liveBuildings=doc.querySelector('#command-data-form select[name="building"]');
-        const choices=liveBuildings ? [...liveBuildings.options].filter(o=>!o.disabled).map(o=>[o.value,o.textContent]) : CATAPULT_TARGETS;
-        building.append(el('option','Selecione o edifício',{value:''}));
-        choices.forEach(([value,label])=>building.append(el('option',label,{value})));
-        building.value=catapultChoices[row.village.id] || '';
-        building.addEventListener('change',()=>{catapultChoices[row.village.id]=building.value;saveMemory();});
-        const buildingLabel=labeled('Alvo das catapultas',building);buildingLabel.hidden=!counts.catapult;
-        buildingLabel.style.marginTop='8px';action.append(buildingLabel);
         tr.append(el('td', `${row.village.name} (${row.village.x}|${row.village.y})`), el('td', plan.distance.toFixed(2)), formationCell, timeCell, action);
         const p = { ...plan, element: tr, row, counts: { ...counts }, target: { x: x.value, y: y.value }, countdown, send, building, attack, support, commandStatus };
         attack.addEventListener('click',()=>sendCommand(p,'attack'));support.addEventListener('click',()=>sendCommand(p,'support'));
